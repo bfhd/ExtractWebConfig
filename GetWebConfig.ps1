@@ -127,7 +127,6 @@ Function Convert-QueryDataToSQL
 	[string] $insert_values = '';
 	[string] $sqlcmd = '';
     [string] $ret_value = '';
-	[int] $fileinfo = 0;
 
     try {
 			$svr = New-Object System.Data.SqlClient.SqlConnection;
@@ -171,13 +170,6 @@ Function Convert-QueryDataToSQL
                             }
 							
                             $itm = $itm.replace("'", "''");
-							
-                         	#collect largest fileinfo number
-							if ($c.ToString() -eq "RecordNum") {
-								if ($fileinfo -lt [int]$r.item($c).Split(':')[0]) {
-									$fileinfo = [int]$r.item($c).Split(':')[0];
-								}
-							}
 							
                             if ($itm -eq 'Null') {
 								$insert_columns += "$c,";
@@ -242,11 +234,6 @@ Function Convert-QueryDataToSQL
                 Write-Output "No data returned";
                 return;
             }
-			#update fileinfo table
-			$fileinfo++;
-			$ret_value += "UPDATE FILEINFO SET NextRecordNum = " + $fileinfo + " WHERE filename = " + "'" + $query.Split()[-1] + "'" + "`r`n";
-            Write-Output $ret_value;
-            return;
     }
     catch
     {
