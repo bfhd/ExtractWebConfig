@@ -2,7 +2,7 @@
 .Synopsis
    Extract Web configuration from Titanium database and generate SQL so it can be inserted somewhere else.
 .DESCRIPTION
-   Convert existing Web configuration into a sql insert script (as with SSMS 'Generate scripts' functionality).
+   Convert existing Web configuration into a sql merge script so it can be copied to another database.
 
 .PARAMETER ServerInstance
     The database server instance name. Defaults to local server.
@@ -41,7 +41,7 @@
 .OUTPUTS
    A .sql file containing insert statements for the specified Web configuration (will clobber existing files).
 .NOTES
-   Author: Ben Roper, 2017/01/09   
+   Author: Ben Roper, 2018/02/26   
    Modified version of https://www.mssqltips.com/sqlservertip/4287/generate-insert-scripts-from-sql-server-queries-and-stored-procedure-output/
    Requires:
     Powershell version 2.0+
@@ -124,9 +124,13 @@ Function Convert-QueryDataToSQL
     
     [string[]]$columns = '';
     [string] $insert_columns = '';
-	[string] $insert_values = '';
+    [string] $insert_values = '';
+    [string] $tablename = '';
 	[string] $sqlcmd = '';
     [string] $ret_value = '';
+    [string] $merge_columns = '';
+    [string] $merge_values = '';
+    [string] $configid = '';
 
     try {
 			$svr = New-Object System.Data.SqlClient.SqlConnection;
@@ -154,8 +158,10 @@ Function Convert-QueryDataToSQL
                 {
                       Foreach ($r in $t.Rows) #loop through each DataRow
                       {
-                          $insert_columns = "INSERT INTO " + $query.Split()[-1] + " (" #gets the table name
-						  $insert_values = " VALUES ("
+                          $tablename = $query.Split()[-1];#gets the table name
+                          $insert_columns = " ("; 
+                          $insert_values = " (";
+                          $merge_values = " (";
                           Foreach ($c in $t.Columns) #loop through each DataColumn
                           {
                             if ($r.item($c) -is 'DBNULL')
@@ -173,42 +179,50 @@ Function Convert-QueryDataToSQL
 							
                             if ($itm -eq 'Null') {
 								$insert_columns += "$c,";
-								$insert_values += "NULL,"
+                                $insert_values += "NULL,";
+                                $merge_values += "NULL as " + "$c," ;
 							} else {
-
+                                if ($c.ColumnName -eq "Id") {$configid = $c}; #get the config id for this row
                                 switch ($c.DataType.name) 
                                 {
                                     {('Guid', 'String', 'DateTime') -contains $_} {
 										$insert_columns += "$c,"
-										$insert_values += "'" + $itm + "',"; 
+                                        $insert_values += "'" + $itm + "',"; 
+                                        $merge_values += "'" + $itm + "' as " + "$c,";
 										break;
 									} 
                                     {('int32', 'int64', 'Decimal', 'double') -contains $_} {
 										$insert_columns += "$c,"
-										$insert_values += $itm + ","; 
+                                        $insert_values += $itm + ","; 
+                                        $merge_values += $itm + " as " + "$c,"
 										break;
 									} 
                                     {('boolean') -contains $_} {
 										if ($r.item($c)) {
-											$insert_columns += "$c,"
-											$insert_values += '1,'
+											$insert_columns += "$c,";
+                                            $insert_values += '1,';
+                                            $merge_values += "1 as $c,";
 										} else {
-											$insert_columns += "$c,"
-											$insert_values += '0,';
+											$insert_columns += "$c,";
+                                            $insert_values += '0,';
+                                            $merge_values += "0 as $c,"
 										}; 
 										break;
 									} 
                                     {$_ -contains ('byte[]')} { 
+                                        if ($c.ColumnName -eq "Timestamp") { break; } # the TimeStamp column auto-updates
 										$insert_columns += "$c,"
-										$insert_values += '0x'+[System.BitConverter]::ToString($r.item($c)).replace('-', '')+",";
+                                        $insert_values += '0x'+[System.BitConverter]::ToString($r.item($c)).replace('-', '')+",";
+                                        $merge_values += '0x'+[System.BitConverter]::ToString($r.item($c)).replace('-', '')+" as " + "$c,";
 										break; 
 									}
                                    # {$_ -contains ('DateTime')} {$insert_columns +="$c="+"'" + $itm + "',"; break;} 
                                     
 
                                     default {
-										$insert_columns += "$c,"# ="+"'" + $r.item($c) + "',"; 
-										$insert_values += "'" + $r.item($c) + "',";
+                                        $insert_columns += "$c,"# ="+"'" + $r.item($c) + "',"; 
+                                        $insert_values += "'" + $r.item($c) + "',";
+                                        $merge_values += "'" + $r.item($c) + "' as " + "$c,";
 										break;
 									} 
 
@@ -218,10 +232,24 @@ Function Convert-QueryDataToSQL
                           }#column loop
 						  
 						#remove trailing comma and replace with close bracket and line breaks
-						$insert_columns = $insert_columns.substring(0,$insert_columns.length - 1) + ")"
-						$insert_values = $insert_values.substring(0,$insert_values.length - 1) + ")`r`n"
-						$sqlcmd = $insert_columns + $insert_values;
-						
+						$insert_columns = $insert_columns.substring(0,$insert_columns.length - 1) + ")";
+                        $insert_values = $insert_values.substring(0,$insert_values.length - 1) + ")`r`n";
+
+                        $separator = [string[]]@("Deleted,"); #this mess is so I can split the string after the "deleted" column
+                        $merge_columns = "(" + $insert_columns.split($separator, [System.StringSplitOptions]::RemoveEmptyEntries)[1];
+
+                        $mergecol_array = $merge_columns.substring(1); #remove the brackets and split up by comma
+                        $mergecol_array = $mergecol_array.substring(0,$mergecol_array.length - 1);
+                        $mergecol_array = $mergecol_array.split(",")
+                        $sqlcmd = "MERGE " + $tablename + " AS [target] USING SELECT" + $merge_values + " AS [source] on [target].Id = [source].Id when matched then update set ";
+                        #generate the merge part of the sql merge
+                        foreach ($col in $mergecol_array) {
+                            $mrg = "[target].[$col] = [source].[$col],";
+                            $sqlcmd += $mrg;
+                        }
+                        $sqlcmd = $sqlcmd.substring(0,$sqlcmd.length - 1); #trailing comma
+                        $sqlcmd += " WHEN NOT MATCHED THEN INSERT " + $insert_columns + " " + $insert_values;
+
                         $ret_value += $sqlcmd;
 
                       } #row loop
@@ -234,6 +262,8 @@ Function Convert-QueryDataToSQL
                 Write-Output "No data returned";
                 return;
             }
+            Write-Output $ret_value;
+            return;
     }
     catch
     {
